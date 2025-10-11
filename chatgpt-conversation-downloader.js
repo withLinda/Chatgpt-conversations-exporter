@@ -955,8 +955,11 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
   // NEW: unified entry. Prefer FS, fall back to anchors.
   async function saveAllPreferFS(items) {
     // compute savable items (skip already-downloaded or without md)
-    const savable = items.filter(it => !persisted.get(it.id)?.status === 'downloaded' ? true : state.downloadStatus.get(it.id) !== 'downloaded')
-      .filter(it => state.mdMap.get(it.id));
+    const savable = items.filter(it => {
+      const persistedStatus = persisted.get(it.id)?.status;
+      const already = persistedStatus === 'downloaded' || state.downloadStatus.get(it.id) === 'downloaded';
+      return !already && !!state.mdMap.get(it.id);
+    });
     const total = savable.length;
     setSaveProgress(0, total, { status: 'waiting' });
 
