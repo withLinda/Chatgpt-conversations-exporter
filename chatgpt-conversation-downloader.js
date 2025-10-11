@@ -21,6 +21,7 @@
     offset: 0,
     sort: { key: 'update_time', dir: 'desc' },
     filterText: '',
+    filterLower: '',
     rowsMap: new Map(),           // id -> { tr, cells... }
     mdMap: new Map(),             // id -> markdown
     convertStatus: new Map(),     // id -> 'pending'|'done'|'error'
@@ -451,6 +452,38 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
   `;
   shadow.appendChild(panel);
 
+  const dom = {
+    tbody: shadow.getElementById('tbody'),
+    countBadge: shadow.getElementById('count-badge'),
+    fetchSummary: shadow.getElementById('fetch-summary'),
+    fetchPFill: shadow.getElementById('fetch-pfill'),
+    fetchPText: shadow.getElementById('fetch-ptext'),
+    convertPFill: shadow.getElementById('convert-pfill'),
+    convertPText: shadow.getElementById('convert-ptext'),
+    savePFill: shadow.getElementById('save-pfill'),
+    savePText: shadow.getElementById('save-ptext'),
+    prepOverlay: shadow.getElementById('prep-overlay'),
+    prepOverlayText: shadow.getElementById('prep-overlay-text'),
+    btnRefresh: shadow.getElementById('btn-refresh'),
+    btnDownload: shadow.getElementById('btn-download'),
+    btnRetry: shadow.getElementById('btn-retry'),
+    btnClose: shadow.getElementById('btn-close'),
+    btnMore: shadow.getElementById('btn-more'),
+    pager: shadow.getElementById('pager'),
+    searchInput: shadow.getElementById('search'),
+    concurrencyInput: shadow.getElementById('concurrency'),
+    sortHeaders: Array.from(shadow.querySelectorAll('thead th')),
+  };
+
+  function getConcurrencyValue() {
+    const input = dom.concurrencyInput;
+    const parsed = input ? parseInt(input.value, 10) : NaN;
+    const safe = clamp(Number.isNaN(parsed) ? state.concurrency : parsed, 1, 5);
+    state.concurrency = safe;
+    if (input && input.value !== String(safe)) input.value = String(safe);
+    return safe;
+  }
+
   // 5) Make panel draggable by header (no external libs)
   (() => {
     const handle = panel.querySelector('#drag-handle');
@@ -577,8 +610,9 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
   }
 
   function updatePager() {
-    const pager = shadow.getElementById('pager');
-    const btn = shadow.getElementById('btn-more');
+    const pager = dom.pager;
+    const btn = dom.btnMore;
+    if (!pager || !btn) return;
     if (state.items.length < state.total) {
       pager.style.display = '';
       btn.onclick = async () => {
@@ -592,11 +626,11 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
   }
 
   function updateCount() {
-    shadow.getElementById('count-badge').textContent = `${state.items.length}`;
+    if (dom.countBadge) dom.countBadge.textContent = `${state.items.length}`;
   }
 
   function updateSummary(message) {
-    const summary = shadow.getElementById('fetch-summary');
+    const summary = dom.fetchSummary;
     if (!summary) return;
     if (message) {
       summary.textContent = message;
@@ -616,8 +650,8 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
 
   function setFetchProgress(done, total, options = {}) {
     const { status = 'idle', message } = options;
-    const fill = shadow.getElementById('fetch-pfill');
-    const text = shadow.getElementById('fetch-ptext');
+    const fill = dom.fetchPFill;
+    const text = dom.fetchPText;
     if (!fill || !text) return;
     const max = total && total > 0 ? total : (done > 0 ? done : 0);
     const pct = max ? Math.min(100, Math.round((done / max) * 100)) : 0;
@@ -657,14 +691,17 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
   }
 
   function applyFilterToRow(tr, title) {
-    if (!state.filterText) { tr.style.display = ''; return; }
-    const show = title.toLowerCase().includes(state.filterText.toLowerCase());
+    if (!state.filterLower) { tr.style.display = ''; return; }
+    const titleLower = title.toLowerCase();
+    const show = titleLower.includes(state.filterLower);
     tr.style.display = show ? '' : 'none';
   }
 
   function renderRows() {
-    const tbody = shadow.getElementById('tbody');
+    const tbody = dom.tbody;
+    if (!tbody) return;
     tbody.innerHTML = '';
+    const frag = document.createDocumentFragment();
     state.rowsMap.clear();
     state.items.forEach((item, idx) => {
       const tr = document.createElement('tr');
@@ -726,18 +763,18 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
       tr.appendChild(tdWS);
       tr.appendChild(tdAPI);
       tr.appendChild(tdDL);
-      tbody.appendChild(tr);
+      frag.appendChild(tr);
 
       state.rowsMap.set(item.id, { tr, tdDL, tdTitle, tdUT });
       applyFilterToRow(tr, item.title || '');
       refreshRowDL(item.id);
     });
+    tbody.appendChild(frag);
     updateSortHeaders();
   }
 
   function updateSortHeaders() {
-    const thead = shadow.querySelectorAll('thead th');
-    thead.forEach(th => {
+    dom.sortHeaders.forEach(th => {
       const key = th.getAttribute('data-key');
       let aria = 'none';
       if (key === state.sort.key) aria = state.sort.dir === 'asc' ? 'ascending' : 'descending';
@@ -772,7 +809,7 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
   }
 
   // 9) Events: sort, filter, refresh, close
-  shadow.querySelectorAll('thead th').forEach(th => {
+  dom.sortHeaders.forEach(th => {
     th.addEventListener('click', () => {
       const key = th.getAttribute('data-key');
       if (key === 'api' || key === 'dl' || key === 'index') return;
@@ -783,45 +820,44 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
     });
   });
 
-  shadow.getElementById('search').addEventListener('input', (e) => {
+  dom.searchInput?.addEventListener('input', (e) => {
     state.filterText = e.target.value || '';
+    state.filterLower = state.filterText.toLowerCase();
     for (const it of state.items) {
       const row = state.rowsMap.get(it.id);
       if (row) applyFilterToRow(row.tr, it.title || '');
     }
   });
 
-  shadow.getElementById('btn-refresh').addEventListener('click', async () => {
+  dom.btnRefresh?.addEventListener('click', async () => {
     try {
-      shadow.getElementById('btn-refresh').disabled = true;
+      dom.btnRefresh.disabled = true;
       await fetchList(0, false);
     } finally {
-      shadow.getElementById('btn-refresh').disabled = false;
+      dom.btnRefresh.disabled = false;
     }
   });
 
-  shadow.getElementById('btn-close').addEventListener('click', () => { host.remove(); });
+  dom.btnClose?.addEventListener('click', () => { host.remove(); });
 
-  shadow.getElementById('concurrency').addEventListener('change', (e) => {
-    const v = parseInt(e.target.value, 10);
-    state.concurrency = clamp(isNaN(v) ? 3 : v, 1, 5);
-    e.target.value = String(state.concurrency);
-  });
+  dom.concurrencyInput?.addEventListener('change', () => { getConcurrencyValue(); });
+  getConcurrencyValue();
 
   // 10) Conversion queue with adjustable concurrency
   function showPreparingOverlay(show, message) {
-    const ov = shadow.getElementById('prep-overlay');
+    const ov = dom.prepOverlay;
     if (!ov) return;
     ov.style.display = show ? 'flex' : 'none';
     ov.setAttribute('aria-hidden', show ? 'false' : 'true');
-    const t = shadow.getElementById('prep-overlay-text');
+    const t = dom.prepOverlayText;
     if (t && message) t.textContent = message;
   }
 
   function setConvertProgress(done, total, options = {}) {
     const { phase = 'converting', message } = options;
-    const pfill = shadow.getElementById('convert-pfill');
-    const ptext = shadow.getElementById('convert-ptext');
+    const pfill = dom.convertPFill;
+    const ptext = dom.convertPText;
+    if (!pfill || !ptext) return;
     const safeTotal = total || 0;
     const pct = safeTotal ? Math.round((done / safeTotal) * 100) : 0;
     pfill.style.width = `${pct}%`;
@@ -841,8 +877,8 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
   // Save/Download progress (ready → waiting → saving → done/error)
   function setSaveProgress(done, total, options = {}) {
     const { status = 'idle', message } = options;
-    const pfill = shadow.getElementById('save-pfill');
-    const ptext = shadow.getElementById('save-ptext');
+    const pfill = dom.savePFill;
+    const ptext = dom.savePText;
     if (!pfill || !ptext) return;
     const safeTotal = total || 0;
     const pct = safeTotal ? Math.min(100, Math.round((done / safeTotal) * 100)) : 0;
@@ -892,7 +928,7 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
     if (!pending.length) return;
     let idx = 0;
     let done = 0;
-    const workers = Math.max(1, Math.min(5, parseInt(shadow.getElementById('concurrency').value, 10) || state.concurrency));
+    const workers = getConcurrencyValue();
     async function worker() {
       while (true) {
         const i = idx++;
@@ -928,14 +964,14 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
     const pending = ids.filter(id => !state.mdMap.get(id));
     if (!pending.length) return;
     state.isConverting = true;
-    const btn = shadow.getElementById('btn-download');
+    const btn = dom.btnDownload;
     if (btn) btn.disabled = true;
 
     let done = 0;
     const total = pending.length;
     setConvertProgress(0, total);
     let idx = 0;
-    const workers = Math.max(1, Math.min(5, parseInt(shadow.getElementById('concurrency').value, 10) || state.concurrency));
+    const workers = getConcurrencyValue();
     async function worker() {
       while (true) {
         const i = idx++;
@@ -1084,9 +1120,9 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
   }
 
   // 11) Download all: ensure detail meta, convert, then save
-  shadow.getElementById('btn-download').addEventListener('click', async () => {
+  dom.btnDownload?.addEventListener('click', async () => {
     const ids = state.items.map(it => it.id);
-    const btn = shadow.getElementById('btn-download');
+    const btn = dom.btnDownload;
     if (btn) btn.disabled = true;
     try {
       // Show immediate status while preparing
@@ -1112,7 +1148,7 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
   // Removed dedicated "Save All to Folder" button in favor of a single unified action
 
   // NEW: Retry Failed
-  shadow.getElementById('btn-retry').addEventListener('click', async () => {
+  dom.btnRetry?.addEventListener('click', async () => {
     const failed = state.items.filter(it => {
       const p = persisted.get(it.id);
       return state.errors.get(it.id) || (p && p.status === 'error');
@@ -1349,7 +1385,7 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
   // Initial fetch
   fetchList(0, false).catch(err => {
     console.error('Failed to fetch conversations:', err);
-    try { shadow.getElementById('convert-ptext').textContent = 'Auth failed. Open any chat to refresh your session, then click "Refresh List".'; } catch {}
+    try { if (dom.convertPText) dom.convertPText.textContent = 'Auth failed. Open any chat to refresh your session, then click "Refresh List".'; } catch {}
   });
 
 })();
