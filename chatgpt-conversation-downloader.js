@@ -31,6 +31,8 @@
     concurrency: 3,
     isConverting: false,
     isFetching: false,
+    gizmos: [],                    // [{ id, name }]
+    projectsCount: 0,              // number of gizmos fetched
     // NEW:
     dirHandle: null,              // chosen directory handle (FS Access API)
     cancelFlag: false,            // reserved for future cancel support
@@ -92,7 +94,7 @@
   }
 
   // Set persist key and hydrate storage once DOM exists
-  state.persistKey = `cgpt:dl:${location.host}`;
+  state.persistKey = `cgpt:dl:all:${location.host}`;
   persisted = new Map(Object.entries(loadPersist()));
 
   // Robust ISO formatter: accepts ISO string, epoch seconds, or epoch ms
@@ -150,8 +152,9 @@
       [detail?.update_time, item.update_time, detail?.create_time, item.create_time]
         .map(dateStrFromTs)
         .find(Boolean) || todayDateStr();
+    const giz = item.gizmo_name ? `-${slugify(item.gizmo_name)}` : '';
     const slug = slugify(item.title);
-    return `${dateStr}-${slug || 'conversation'}.md`;
+    return `${dateStr}${giz}-${slug || 'conversation'}.md`;
   };
   const icon = {
     check: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M20 6L9 17l-5-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
@@ -419,6 +422,8 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
             <th data-key="create_time" aria-sort="none">create_time</th>
             <th data-key="update_time" aria-sort="descending">update_time</th>
             <th data-key="workspace_id" aria-sort="none">workspace_id</th>
+            <th data-key="gizmo_id" aria-sort="none">gizmo_id</th>
+            <th data-key="gizmo_name" aria-sort="none">gizmo_name</th>
             <th data-key="api" aria-sort="none">conversation URL API</th>
             <th data-key="dl" aria-sort="none">DL checker</th>
           </tr>
@@ -565,6 +570,47 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
     }
   }
 
+  async function fetchGizmos() {
+    const url = '/backend-api/gizmos/snorlax/sidebar?conversations_per_gizmo=5&owned_only=true';
+    const data = await fetchJSONWithRetries(url, { method: 'GET' });
+    const arr = Array.isArray(data?.items) ? data.items : [];
+    const out = [];
+    for (let i = 0; i < arr.length; i++) {
+      const g = arr[i]?.gizmo?.gizmo;
+      const id = g?.id || null;
+      const name = g?.display?.name || null;
+      if (id && name) out.push({ id, name });
+    }
+    return out;
+  }
+
+  async function fetchConversationsForGizmo(gizmo, onProgress) {
+    const results = [];
+    let cursor = 0;
+    while (true) {
+      const url = `/backend-api/gizmos/${encodeURIComponent(gizmo.id)}/conversations?cursor=${encodeURIComponent(cursor)}`;
+      const data = await fetchJSONWithRetries(url, { method: 'GET' });
+      const items = Array.isArray(data?.items) ? data.items : [];
+      for (const it of items) {
+        results.push({
+          id: it.id,
+          title: it.title || 'untitled',
+          create_time: it.create_time || null,
+          update_time: it.update_time || null,
+          workspace_id: it.workspace_id || '-',
+          gizmo_id: it.gizmo_id || gizmo.id,
+          gizmo_name: gizmo.name
+        });
+      }
+      if (typeof onProgress === 'function') onProgress(results.length);
+      const nextCur = (data && (data.cursor ?? data.next_cursor ?? data.next)) ?? null;
+      if (nextCur == null || nextCur === '' || nextCur === cursor || items.length === 0) break;
+      cursor = nextCur;
+      await sleep(120);
+    }
+    return results;
+  }
+
   // 7) List fetching + pager
   async function fetchList(offset = 0, append = false) {
     const url = `/backend-api/conversations?offset=${offset}&limit=${state.limit}&order=updated&is_archived=false&is_starred=false`;
@@ -625,6 +671,102 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
     }
   }
 
+  async function refreshAll() {
+    state.isFetching = true;
+    state.items = [];
+    state.total = 0;
+    state.gizmos = [];
+    state.projectsCount = 0;
+    renderRows();
+    updateCount();
+    updateSummary('Fetching conversations…');
+    setFetchProgress(0, 0, { status: 'fetching' });
+
+    let summaryError = false;
+    try {
+      await fetchList(0, false);
+      state.isFetching = true;
+      updateSummary('Fetching conversations…');
+      setFetchProgress(state.items.length, state.total || state.items.length, { status: 'fetching' });
+      while (true) {
+        const prev = state.items.length;
+        const totalKnown = typeof state.total === 'number' && state.total > 0;
+        if (totalKnown && prev >= state.total) break;
+        await fetchList(prev, true);
+        state.isFetching = true;
+        updateSummary('Fetching conversations…');
+        const fetched = state.items.length - prev;
+        setFetchProgress(state.items.length, state.total || state.items.length, { status: 'fetching' });
+        if (totalKnown) {
+          if (state.items.length >= state.total) break;
+        } else {
+          if (fetched <= 0 || fetched < state.limit) break;
+        }
+      }
+      const globalItems = state.items.slice();
+
+      const gizmos = await fetchGizmos();
+      state.gizmos = gizmos;
+      state.projectsCount = gizmos.length;
+
+      const baseLoaded = globalItems.length;
+      let loaded = 0;
+      const projOut = [];
+      let idx = 0;
+      const workers = getConcurrencyValue();
+      async function worker() {
+        while (true) {
+          const i = idx++;
+          if (i >= gizmos.length) break;
+          const g = gizmos[i];
+          const convs = await fetchConversationsForGizmo(g, (n) => {
+            setFetchProgress(baseLoaded + loaded + n, undefined, { status: 'fetching' });
+          });
+          loaded += convs.length;
+          projOut.push(...convs);
+          setFetchProgress(baseLoaded + loaded, undefined, { status: 'fetching' });
+        }
+      }
+      await Promise.all(Array.from({ length: workers }, worker));
+
+      const merged = new Map();
+      for (const it of globalItems) {
+        merged.set(it.id, { ...it, gizmo_id: it.gizmo_id || '-', gizmo_name: it.gizmo_name || '-' });
+      }
+      for (const it of projOut) {
+        const prev = merged.get(it.id);
+        if (!prev) merged.set(it.id, it);
+        else {
+          const better = (it.gizmo_id && it.gizmo_id !== '-') ? it : prev;
+          merged.set(it.id, { ...better, workspace_id: better.workspace_id || prev.workspace_id || '-' });
+        }
+      }
+      state.items = Array.from(merged.values());
+      state.total = state.items.length;
+
+      updateCount();
+      sortItems();
+      for (const it of state.items) {
+        if (persisted.get(it.id)?.status === 'downloaded') {
+          state.downloadStatus.set(it.id, 'downloaded');
+        }
+      }
+      renderRows();
+      persistNow();
+      setFetchProgress(state.items.length, state.total, { status: 'idle' });
+      if (dom.pager) dom.pager.style.display = 'none';
+    } catch (err) {
+      const message = err && err.message ? err.message : String(err);
+      setFetchProgress(state.items.length, state.total || state.items.length, { status: 'error', message });
+      summaryError = true;
+      updateSummary('Fetch failed. See console for details.');
+      console.error(err);
+    } finally {
+      state.isFetching = false;
+      if (!summaryError) updateSummary();
+    }
+  }
+
   function updateCount() {
     if (dom.countBadge) dom.countBadge.textContent = `${state.items.length}`;
   }
@@ -636,16 +778,10 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
       summary.textContent = message;
       return;
     }
-    if (state.isFetching) {
-      summary.textContent = 'Fetching conversations…';
-      return;
-    }
-    const knownTotal = typeof state.total === 'number' && state.total > 0 ? state.total : null;
-    if (knownTotal) {
-      summary.textContent = `Loaded ${state.items.length} of ${knownTotal} conversations`;
-    } else {
-      summary.textContent = `Loaded ${state.items.length} conversations`;
-    }
+    if (state.isFetching) { summary.textContent = 'Fetching conversations…'; return; }
+    const total = state.items.length;
+    const projects = state.projectsCount || (state.gizmos ? state.gizmos.length : 0);
+    summary.textContent = `Loaded ${total} conversations across ${projects} projects`;
   }
 
   function setFetchProgress(done, total, options = {}) {
@@ -681,7 +817,7 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
         va = a[key] ? new Date(a[key]).getTime() : 0;
         vb = b[key] ? new Date(b[key]).getTime() : 0;
         return (va - vb) * mult;
-      } else if (key === 'id' || key === 'workspace_id' || key === 'title') {
+      } else if (key === 'id' || key === 'workspace_id' || key === 'gizmo_id' || key === 'gizmo_name' || key === 'title') {
         va = String(a[key] || '');
         vb = String(b[key] || '');
         return va.localeCompare(vb) * mult;
@@ -742,6 +878,13 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
       tdWS.className = 'ws-col mono';
       tdWS.textContent = item.workspace_id || '-';
 
+      const tdGZ = document.createElement('td');
+      tdGZ.className = 'ws-col mono';
+      tdGZ.textContent = item.gizmo_id || '-';
+
+      const tdGN = document.createElement('td');
+      tdGN.textContent = item.gizmo_name || '-';
+
       const tdAPI = document.createElement('td');
       tdAPI.className = 'api-link';
       const a = document.createElement('a');
@@ -761,6 +904,8 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
       tr.appendChild(tdCT);
       tr.appendChild(tdUT);
       tr.appendChild(tdWS);
+      tr.appendChild(tdGZ);
+      tr.appendChild(tdGN);
       tr.appendChild(tdAPI);
       tr.appendChild(tdDL);
       frag.appendChild(tr);
@@ -830,12 +975,8 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
   });
 
   dom.btnRefresh?.addEventListener('click', async () => {
-    try {
-      dom.btnRefresh.disabled = true;
-      await fetchList(0, false);
-    } finally {
-      dom.btnRefresh.disabled = false;
-    }
+    try { dom.btnRefresh.disabled = true; await refreshAll(); }
+    finally { dom.btnRefresh.disabled = false; }
   });
 
   dom.btnClose?.addEventListener('click', () => { host.remove(); });
@@ -1382,8 +1523,8 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
   setFetchProgress(0, 0, { status: 'idle' });
   updateSummary();
 
-  // Initial fetch
-  fetchList(0, false).catch(err => {
+  // Initial fetch (global + projects)
+  refreshAll().catch(err => {
     console.error('Failed to fetch conversations:', err);
     try { if (dom.convertPText) dom.convertPText.textContent = 'Auth failed. Open any chat to refresh your session, then click "Refresh List".'; } catch {}
   });
