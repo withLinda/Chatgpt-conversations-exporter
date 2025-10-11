@@ -360,6 +360,21 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
   box-shadow: 0 0 20px color-mix(in srgb, var(--acc-aqua) 40%, transparent);
 }
 .progress .text { font-size: 12px; color: var(--gray-2); }
+.overlay {
+  position: absolute; inset: 0; display: none; align-items: center; justify-content: center; flex-direction: column;
+  background: color-mix(in srgb, var(--bg-2) 35%, transparent);
+  backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px);
+  z-index: 10; pointer-events: none;
+}
+.spinner {
+  width: 28px; height: 28px; border-radius: 50%;
+  border: 3px solid color-mix(in srgb, var(--bg-5) 60%, transparent);
+  border-top-color: var(--acc-aqua);
+  animation: spin 1s linear infinite;
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--acc-aqua) 40%, transparent));
+}
+.overlay-text { margin-top: 8px; font-size: 12px; color: var(--gray-2); }
+@keyframes spin { to { transform: rotate(360deg); } }
 .summary {
   display: flex; align-items: center; justify-content: space-between;
   padding: 8px 12px; border-top: 1px solid var(--panel-br);
@@ -428,6 +443,10 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
     </div>
     <div class="footer">
       Note: Heavy usage may hit rate limits. Internal endpoints with cookies only; no tokens embedded.
+    </div>
+    <div class="overlay" id="prep-overlay" aria-hidden="true">
+      <div class="spinner" aria-hidden="true"></div>
+      <div class="overlay-text" id="prep-overlay-text">Preparing…</div>
     </div>
   `;
   shadow.appendChild(panel);
@@ -790,13 +809,33 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
   });
 
   // 10) Conversion queue with adjustable concurrency
-  function setConvertProgress(done, total) {
+  function showPreparingOverlay(show, message) {
+    const ov = shadow.getElementById('prep-overlay');
+    if (!ov) return;
+    ov.style.display = show ? 'flex' : 'none';
+    ov.setAttribute('aria-hidden', show ? 'false' : 'true');
+    const t = shadow.getElementById('prep-overlay-text');
+    if (t && message) t.textContent = message;
+  }
+
+  function setConvertProgress(done, total, options = {}) {
+    const { phase = 'converting', message } = options;
     const pfill = shadow.getElementById('convert-pfill');
     const ptext = shadow.getElementById('convert-ptext');
     const safeTotal = total || 0;
     const pct = safeTotal ? Math.round((done / safeTotal) * 100) : 0;
     pfill.style.width = `${pct}%`;
-    ptext.textContent = `${done} of ${safeTotal} converted`;
+    if (phase === 'preparing') {
+      const label = message || 'Preparing… fetching details';
+      ptext.textContent = `${label} (${done} of ${safeTotal})`;
+      showPreparingOverlay(true, label);
+    } else if (phase === 'error') {
+      ptext.textContent = message ? `Conversion failed: ${message}` : 'Conversion failed';
+      showPreparingOverlay(false);
+    } else {
+      ptext.textContent = `${done} of ${safeTotal} converted`;
+      showPreparingOverlay(false);
+    }
   }
 
   // Save/Download progress (ready → waiting → saving → done/error)
@@ -848,10 +887,11 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
     return { update_time: detailUpdate ?? inferred ?? null, create_time: detailCreate ?? null };
   }
 
-  async function ensureDetailMeta(ids) {
+  async function ensureDetailMeta(ids, onProgress) {
     const pending = ids.filter(id => !state.detailMeta.has(id));
     if (!pending.length) return;
     let idx = 0;
+    let done = 0;
     const workers = Math.max(1, Math.min(5, parseInt(shadow.getElementById('concurrency').value, 10) || state.concurrency));
     async function worker() {
       while (true) {
@@ -875,6 +915,9 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
           }
         } catch (_) {
           /* ignore detail fetch failure here */
+        } finally {
+          done++;
+          if (onProgress) onProgress(done);
         }
       }
     }
@@ -1043,12 +1086,27 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
   // 11) Download all: ensure detail meta, convert, then save
   shadow.getElementById('btn-download').addEventListener('click', async () => {
     const ids = state.items.map(it => it.id);
-    await ensureDetailMeta(ids);
-    await convertMissing(ids);
-    // Indicate readiness before prompting for folder
-    const totalSavable = state.items.filter(it => state.mdMap.get(it.id) && state.downloadStatus.get(it.id) !== 'downloaded' && persisted.get(it.id)?.status !== 'downloaded').length;
-    setSaveProgress(0, totalSavable, { status: 'ready' });
-    await saveAllPreferFS(state.items);
+    const btn = shadow.getElementById('btn-download');
+    if (btn) btn.disabled = true;
+    try {
+      // Show immediate status while preparing
+      setConvertProgress(0, ids.length, { phase: 'preparing' });
+      let prepDone = 0;
+      await ensureDetailMeta(ids, (n) => {
+        prepDone = n;
+        setConvertProgress(prepDone, ids.length, { phase: 'preparing' });
+      });
+
+      // Convert with progress
+      await convertMissing(ids);
+
+      // Indicate readiness before prompting for folder
+      const totalSavable = state.items.filter(it => state.mdMap.get(it.id) && state.downloadStatus.get(it.id) !== 'downloaded' && persisted.get(it.id)?.status !== 'downloaded').length;
+      setSaveProgress(0, totalSavable, { status: 'ready' });
+      await saveAllPreferFS(state.items);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
   });
 
   // Removed dedicated "Save All to Folder" button in favor of a single unified action
@@ -1283,6 +1341,7 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
   }
   persistNow();
   setConvertProgress(0, 0);
+  try { showPreparingOverlay(false); } catch {}
   setSaveProgress(0, 0, { status: 'idle' });
   setFetchProgress(0, 0, { status: 'idle' });
   updateSummary();
