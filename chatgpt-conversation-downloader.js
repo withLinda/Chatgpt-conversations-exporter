@@ -319,9 +319,7 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
         <span class="badge" id="count-badge">0</span>
       </div>
       <div class="header-actions">
-        <button class="btn primary" id="btn-convert">Convert All</button>
-        <button class="btn" id="btn-download">Download All Markdowns</button>
-        <button class="btn" id="btn-save-folder">Save All to Folder</button>
+        <button class="btn primary" id="btn-download">Convert & Download All</button>
         <button class="btn" id="btn-retry">Retry Failed</button>
         <button class="btn danger" id="btn-close">Close</button>
       </div>
@@ -360,6 +358,10 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
     <div class="progress" id="convert-progress">
       <div class="pbar"><div class="fill" id="convert-pfill" style="width:0%"></div></div>
       <div class="text" id="convert-ptext" aria-live="polite">0 of 0 converted</div>
+    </div>
+    <div class="progress" id="save-progress">
+      <div class="pbar"><div class="fill" id="save-pfill" style="width:0%"></div></div>
+      <div class="text" id="save-ptext" aria-live="polite">Waiting to save…</div>
     </div>
     <div class="footer">
       Note: Heavy usage may hit rate limits. Internal endpoints with cookies only; no tokens embedded.
@@ -734,6 +736,32 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
     ptext.textContent = `${done} of ${safeTotal} converted`;
   }
 
+  // Save/Download progress (ready → waiting → saving → done/error)
+  function setSaveProgress(done, total, options = {}) {
+    const { status = 'idle', message } = options;
+    const pfill = shadow.getElementById('save-pfill');
+    const ptext = shadow.getElementById('save-ptext');
+    if (!pfill || !ptext) return;
+    const safeTotal = total || 0;
+    const pct = safeTotal ? Math.min(100, Math.round((done / safeTotal) * 100)) : 0;
+    pfill.style.width = `${pct}%`;
+
+    if (status === 'ready') {
+      ptext.textContent = safeTotal ? `Ready to save ${safeTotal} file${safeTotal === 1 ? '' : 's'}` : 'Nothing to save';
+    } else if (status === 'waiting') {
+      ptext.textContent = 'Waiting for folder selection…';
+    } else if (status === 'saving') {
+      const totalLabel = safeTotal || '…';
+      ptext.textContent = `Saving… (${done} of ${totalLabel})`;
+    } else if (status === 'done') {
+      ptext.textContent = `Saved ${done} of ${safeTotal} file${safeTotal === 1 ? '' : 's'}`;
+    } else if (status === 'error') {
+      ptext.textContent = message ? `Save failed: ${message}` : 'Save failed';
+    } else {
+      ptext.textContent = safeTotal ? `${done} of ${safeTotal} saved` : 'Ready';
+    }
+  }
+
   // Helper: infer update_time from messages when API lacks it
   function inferUpdateTimeFromMessages(data) {
     try {
@@ -794,7 +822,8 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
     const pending = ids.filter(id => !state.mdMap.get(id));
     if (!pending.length) return;
     state.isConverting = true;
-    shadow.getElementById('btn-convert').disabled = true;
+    const btn = shadow.getElementById('btn-download');
+    if (btn) btn.disabled = true;
 
     let done = 0;
     const total = pending.length;
@@ -836,13 +865,9 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
     }
     await Promise.all(Array.from({length: workers}, worker));
     state.isConverting = false;
-    shadow.getElementById('btn-convert').disabled = false;
+    if (btn) btn.disabled = false;
   }
 
-  shadow.getElementById('btn-convert').addEventListener('click', async () => {
-    const ids = state.items.map(it => it.id);
-    await convertMissing(ids);
-  });
 
   // 11) Download helpers: File System Access API and throttled anchor fallback
   async function ensureDir() {
@@ -851,18 +876,20 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
     return state.dirHandle;
   }
 
-  async function downloadAllToFolder(items) {
+  async function downloadAllToFolder(items, onProgress) {
     const dir = await ensureDir();
     if (!dir) throw new Error('No folder selected');
+    let done = 0;
     for (const it of items) {
       // skip if already persisted as downloaded
       if (persisted.get(it.id)?.status === 'downloaded') {
         state.downloadStatus.set(it.id, 'downloaded');
         refreshRowDL(it.id);
+        if (onProgress) onProgress(++done);
         continue;
       }
       const md = state.mdMap.get(it.id);
-      if (!md) continue;
+      if (!md) { if (onProgress) onProgress(++done); continue; }
       const name = filenameFor(it);
       try {
         await withBackoff(async () => {
@@ -879,23 +906,26 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
       refreshRowDL(it.id);
       persistNow();
       await sleep(10);
+      if (onProgress) onProgress(++done);
     }
   }
 
-  async function downloadAllViaAnchors(items) {
+  async function downloadAllViaAnchors(items, onProgress) {
     // Smaller batches and longer pauses reduce throttling
     const BATCH = 5;
     const PAUSE_MS = 2000;
     let launched = 0;
+    let done = 0;
     for (let i = 0; i < items.length; i++) {
       const it = items[i];
       if (persisted.get(it.id)?.status === 'downloaded') {
         state.downloadStatus.set(it.id, 'downloaded');
         refreshRowDL(it.id);
+        if (onProgress) onProgress(++done);
         continue;
       }
       const md = state.mdMap.get(it.id);
-      if (!md) continue;
+      if (!md) { if (onProgress) onProgress(++done); continue; }
       try {
         await withBackoff(async () => {
           const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
@@ -918,16 +948,33 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
         refreshRowDL(it.id);
       }
       persistNow();
+      if (onProgress) onProgress(++done);
     }
   }
 
   // NEW: unified entry. Prefer FS, fall back to anchors.
   async function saveAllPreferFS(items) {
+    // compute savable items (skip already-downloaded or without md)
+    const savable = items.filter(it => {
+      const persistedStatus = persisted.get(it.id)?.status;
+      const already = persistedStatus === 'downloaded' || state.downloadStatus.get(it.id) === 'downloaded';
+      return !already && !!state.mdMap.get(it.id);
+    });
+    const total = savable.length;
+    setSaveProgress(0, total, { status: 'waiting' });
+
+    let progressed = 0;
+    const onProgress = (n) => {
+      progressed = n;
+      setSaveProgress(progressed, total, { status: 'saving' });
+    };
+
     if (supportsFS()) {
       const dir = await ensureDir();
-      if (dir) { await downloadAllToFolder(items); return; }
+      if (dir) { await downloadAllToFolder(savable, onProgress); setSaveProgress(progressed, total, { status: 'done' }); return; }
     }
-    await downloadAllViaAnchors(items);
+    await downloadAllViaAnchors(savable, onProgress);
+    setSaveProgress(progressed, total, { status: 'done' });
   }
 
   // 11) Download all: ensure detail meta, convert, then save
@@ -935,21 +982,13 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
     const ids = state.items.map(it => it.id);
     await ensureDetailMeta(ids);
     await convertMissing(ids);
+    // Indicate readiness before prompting for folder
+    const totalSavable = state.items.filter(it => state.mdMap.get(it.id) && state.downloadStatus.get(it.id) !== 'downloaded' && persisted.get(it.id)?.status !== 'downloaded').length;
+    setSaveProgress(0, totalSavable, { status: 'ready' });
     await saveAllPreferFS(state.items);
   });
 
-  shadow.getElementById('btn-save-folder').addEventListener('click', async () => {
-    if (!('showDirectoryPicker' in window)) {
-      alert('Your browser does not support saving to a folder. Use "Download All Markdowns" instead.');
-      return;
-    }
-    const ids = state.items.map(it => it.id);
-    await ensureDetailMeta(ids);
-    await convertMissing(ids);
-    state.dirHandle = await pickDirectory();
-    if (!state.dirHandle) return;
-    await downloadAllToFolder(state.items);
-  });
+  // Removed dedicated "Save All to Folder" button in favor of a single unified action
 
   // NEW: Retry Failed
   shadow.getElementById('btn-retry').addEventListener('click', async () => {
@@ -958,6 +997,8 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
       return state.errors.get(it.id) || (p && p.status === 'error');
     });
     if (!failed.length) return;
+    const totalSavable = failed.filter(it => state.mdMap.get(it.id)).length;
+    setSaveProgress(0, totalSavable, { status: 'ready' });
     await saveAllPreferFS(failed);
   });
 
@@ -1179,6 +1220,7 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
   }
   persistNow();
   setConvertProgress(0, 0);
+  setSaveProgress(0, 0, { status: 'idle' });
   setFetchProgress(0, 0, { status: 'idle' });
   updateSummary();
 
@@ -1188,11 +1230,4 @@ tbody tr:hover { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
     try { shadow.getElementById('convert-ptext').textContent = 'Auth failed. Open any chat to refresh your session, then click "Refresh List".'; } catch {}
   });
 
-  // Hide "Save All to Folder" button if unsupported
-  try {
-    if (!('showDirectoryPicker' in window)) {
-      const b = shadow.getElementById('btn-save-folder');
-      if (b) b.style.display = 'none';
-    }
-  } catch {}
 })();
