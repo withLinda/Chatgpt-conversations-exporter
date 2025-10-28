@@ -31,10 +31,8 @@ https://github.com/user-attachments/assets/4554df06-e612-4e46-98cd-c23a8d20fb29
 
 3) Load and run the script
 
-Option A — Paste the script
-- Open `chatgpt-conversation-downloader.js` from this repo, copy its entire contents, and paste into the Console, then press Enter.
-
-Note: One‑liner fetch from external origins (e.g., raw.githubusercontent.com) is blocked on ChatGPT by its Content Security Policy (connect-src), so pasting is required. The console error “Refused to connect … violates Content Security Policy” and “TypeError: Failed to fetch” are expected in this case.
+Paste the script
+- Open [`chatgpt-conversation-downloader.js`](https://github.com/withLinda/Chatgpt-conversations-exporter/blob/main/chatgpt-conversation-downloader.js) from this repo, copy its entire contents, and paste into the Console, then press Enter.
 
 The panel will appear at the bottom‑right of the page.
 
