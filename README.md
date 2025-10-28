@@ -4,6 +4,12 @@ Export your ChatGPT conversations straight from the browser into clean Markdown 
 
 ![ChatGPT Conversation Downloader UI](screenshot.png)
 
+# Walkthrough video
+
+https://github.com/user-attachments/assets/4554df06-e612-4e46-98cd-c23a8d20fb29
+
+
+
 ## What it does
 
 - Lists your conversations using ChatGPT’s in‑page APIs (with your existing session cookies)
